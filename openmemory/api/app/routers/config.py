@@ -1,11 +1,16 @@
 from typing import Any, Dict, Optional
+import os
+import json
+import logging
 
 from app.database import get_db
 from app.models import Config as ConfigModel
 from app.utils.memory import reset_memory_client
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
 
@@ -54,19 +59,19 @@ def get_default_configuration():
         },
         "mem0": {
             "llm": {
-                "provider": "openai",
+                "provider": "deepseek",
                 "config": {
-                    "model": "gpt-4o-mini",
+                    "model": "deepseek-chat",
                     "temperature": 0.1,
                     "max_tokens": 2000,
-                    "api_key": "env:OPENAI_API_KEY"
+                    "api_key": "env:DEEPSEEK_API_KEY"
                 }
             },
             "embedder": {
-                "provider": "openai",
+                "provider": "ollama",
                 "config": {
-                    "model": "text-embedding-3-small",
-                    "api_key": "env:OPENAI_API_KEY"
+                    "model": "qwen3-embedding:4b",
+                    "ollama_base_url": "http://host.docker.internal:11434"
                 }
             },
             "vector_store": None
@@ -76,35 +81,44 @@ def get_default_configuration():
 def get_config_from_db(db: Session, key: str = "main"):
     """Get configuration from database."""
     config = db.query(ConfigModel).filter(ConfigModel.key == key).first()
-    
+
     if not config:
-        # Create default config with proper provider configurations
-        default_config = get_default_configuration()
+        # Try to load a local `config.json` file (mounted into the container) and use it as default
+        try:
+            cwd_config_path = os.path.join(os.getcwd(), "config.json")
+            if os.path.exists(cwd_config_path):
+                with open(cwd_config_path, "r", encoding="utf-8") as f:
+                    default_config = json.load(f)
+            else:
+                default_config = get_default_configuration()
+        except Exception:
+            default_config = get_default_configuration()
+
         db_config = ConfigModel(key=key, value=default_config)
         db.add(db_config)
         db.commit()
         db.refresh(db_config)
         return default_config
-    
+
     # Ensure the config has all required sections with defaults
     config_value = config.value
     default_config = get_default_configuration()
-    
+
     # Merge with defaults to ensure all required fields exist
     if "openmemory" not in config_value:
         config_value["openmemory"] = default_config["openmemory"]
-    
+
     if "mem0" not in config_value:
         config_value["mem0"] = default_config["mem0"]
     else:
         # Ensure LLM config exists with defaults
         if "llm" not in config_value["mem0"] or config_value["mem0"]["llm"] is None:
             config_value["mem0"]["llm"] = default_config["mem0"]["llm"]
-        
+
         # Ensure embedder config exists with defaults
         if "embedder" not in config_value["mem0"] or config_value["mem0"]["embedder"] is None:
             config_value["mem0"]["embedder"] = default_config["mem0"]["embedder"]
-        
+
         # Ensure vector_store config exists with defaults
         if "vector_store" not in config_value["mem0"]:
             config_value["mem0"]["vector_store"] = default_config["mem0"]["vector_store"]
@@ -114,20 +128,20 @@ def get_config_from_db(db: Session, key: str = "main"):
         config.value = config_value
         db.commit()
         db.refresh(config)
-    
+
     return config_value
 
 def save_config_to_db(db: Session, config: Dict[str, Any], key: str = "main"):
     """Save configuration to database."""
     db_config = db.query(ConfigModel).filter(ConfigModel.key == key).first()
-    
+
     if db_config:
         db_config.value = config
         db_config.updated_at = None  # Will trigger the onupdate to set current time
     else:
         db_config = ConfigModel(key=key, value=config)
         db.add(db_config)
-        
+
     db.commit()
     db.refresh(db_config)
     return db_config.value
@@ -139,22 +153,34 @@ async def get_configuration(db: Session = Depends(get_db)):
     return config
 
 @router.put("/", response_model=ConfigSchema)
-async def update_configuration(config: ConfigSchema, db: Session = Depends(get_db)):
+async def update_configuration(request: Request, config: ConfigSchema, db: Session = Depends(get_db)):
     """Update the configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Convert to dict for processing
-    updated_config = current_config.copy()
-    
-    # Update openmemory settings if provided
-    if config.openmemory is not None:
-        if "openmemory" not in updated_config:
-            updated_config["openmemory"] = {}
-        updated_config["openmemory"].update(config.openmemory.dict(exclude_none=True))
-    
-    # Update mem0 settings
-    updated_config["mem0"] = config.mem0.dict(exclude_none=True)
-    
+    try:
+        logger.info("Received PUT /api/v1/config from %s: %s", request.client.host if request.client else None, config.dict(exclude_none=True))
+
+        current_config = get_config_from_db(db)
+        # Convert to dict for processing
+        updated_config = current_config.copy()
+
+        # Update openmemory settings if provided
+        if config.openmemory is not None:
+            if "openmemory" not in updated_config:
+                updated_config["openmemory"] = {}
+            updated_config["openmemory"].update(config.openmemory.dict(exclude_none=True))
+
+        # Update mem0 settings if provided
+        if config.mem0 is not None:
+            updated_config["mem0"] = config.mem0.dict(exclude_none=True)
+
+        # Save the updated configuration to the database and reset memory client
+        save_config_to_db(db, updated_config)
+        reset_memory_client()
+
+        # Return the updated configuration
+        return updated_config
+    except Exception as e:
+        logger.exception("Failed to update configuration: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update configuration: {str(e)}")
 
 @router.patch("/", response_model=ConfigSchema)
 async def patch_configuration(config_update: ConfigSchema, db: Session = Depends(get_db)):
@@ -183,14 +209,14 @@ async def reset_configuration(db: Session = Depends(get_db)):
     try:
         # Get the default configuration with proper provider setups
         default_config = get_default_configuration()
-        
+
         # Save it as the current configuration in the database
         save_config_to_db(db, default_config)
         reset_memory_client()
         return default_config
     except Exception as e:
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Failed to reset configuration: {str(e)}"
         )
 
@@ -202,22 +228,26 @@ async def get_llm_configuration(db: Session = Depends(get_db)):
     return llm_config
 
 @router.put("/mem0/llm", response_model=LLMProvider)
-async def update_llm_configuration(llm_config: LLMProvider, db: Session = Depends(get_db)):
+async def update_llm_configuration(request: Request, llm_config: LLMProvider, db: Session = Depends(get_db)):
     """Update only the LLM configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Ensure mem0 key exists
-    if "mem0" not in current_config:
-        current_config["mem0"] = {}
-    
-    # Update the LLM configuration
-    current_config["mem0"]["llm"] = llm_config.dict(exclude_none=True)
-    
-    # Save the configuration to database
-    save_config_to_db(db, current_config)
-    reset_memory_client()
-    return current_config["mem0"]["llm"]
+    try:
+        logger.info("Received PUT /api/v1/config/mem0/llm from %s: %s", request.client.host if request.client else None, llm_config.dict(exclude_none=True))
 
+        current_config = get_config_from_db(db)
+        # Ensure mem0 key exists
+        if "mem0" not in current_config:
+            current_config["mem0"] = {}
+
+        # Update the LLM configuration
+        current_config["mem0"]["llm"] = llm_config.dict(exclude_none=True)
+
+        # Save the configuration to database
+        save_config_to_db(db, current_config)
+        reset_memory_client()
+        return current_config["mem0"]["llm"]
+    except Exception as e:
+        logger.exception("Failed to update LLM configuration: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update LLM configuration: {str(e)}")
 @router.get("/mem0/embedder", response_model=EmbedderProvider)
 async def get_embedder_configuration(db: Session = Depends(get_db)):
     """Get only the Embedder configuration."""
@@ -226,22 +256,26 @@ async def get_embedder_configuration(db: Session = Depends(get_db)):
     return embedder_config
 
 @router.put("/mem0/embedder", response_model=EmbedderProvider)
-async def update_embedder_configuration(embedder_config: EmbedderProvider, db: Session = Depends(get_db)):
+async def update_embedder_configuration(request: Request, embedder_config: EmbedderProvider, db: Session = Depends(get_db)):
     """Update only the Embedder configuration."""
-    current_config = get_config_from_db(db)
-    
-    # Ensure mem0 key exists
-    if "mem0" not in current_config:
-        current_config["mem0"] = {}
-    
-    # Update the Embedder configuration
-    current_config["mem0"]["embedder"] = embedder_config.dict(exclude_none=True)
-    
-    # Save the configuration to database
-    save_config_to_db(db, current_config)
-    reset_memory_client()
-    return current_config["mem0"]["embedder"]
+    try:
+        logger.info("Received PUT /api/v1/config/mem0/embedder from %s: %s", request.client.host if request.client else None, embedder_config.dict(exclude_none=True))
 
+        current_config = get_config_from_db(db)
+        # Ensure mem0 key exists
+        if "mem0" not in current_config:
+            current_config["mem0"] = {}
+
+        # Update the Embedder configuration
+        current_config["mem0"]["embedder"] = embedder_config.dict(exclude_none=True)
+
+        # Save the configuration to database
+        save_config_to_db(db, current_config)
+        reset_memory_client()
+        return current_config["mem0"]["embedder"]
+    except Exception as e:
+        logger.exception("Failed to update embedder configuration: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update embedder configuration: {str(e)}")
 @router.get("/mem0/vector_store", response_model=Optional[VectorStoreProvider])
 async def get_vector_store_configuration(db: Session = Depends(get_db)):
     """Get only the Vector Store configuration."""
@@ -253,14 +287,14 @@ async def get_vector_store_configuration(db: Session = Depends(get_db)):
 async def update_vector_store_configuration(vector_store_config: VectorStoreProvider, db: Session = Depends(get_db)):
     """Update only the Vector Store configuration."""
     current_config = get_config_from_db(db)
-    
+
     # Ensure mem0 key exists
     if "mem0" not in current_config:
         current_config["mem0"] = {}
-    
+
     # Update the Vector Store configuration
     current_config["mem0"]["vector_store"] = vector_store_config.dict(exclude_none=True)
-    
+
     # Save the configuration to database
     save_config_to_db(db, current_config)
     reset_memory_client()
@@ -277,14 +311,14 @@ async def get_openmemory_configuration(db: Session = Depends(get_db)):
 async def update_openmemory_configuration(openmemory_config: OpenMemoryConfig, db: Session = Depends(get_db)):
     """Update only the OpenMemory configuration."""
     current_config = get_config_from_db(db)
-    
+
     # Ensure openmemory key exists
     if "openmemory" not in current_config:
         current_config["openmemory"] = {}
-    
+
     # Update the OpenMemory configuration
     current_config["openmemory"].update(openmemory_config.dict(exclude_none=True))
-    
+
     # Save the configuration to database
     save_config_to_db(db, current_config)
     reset_memory_client()

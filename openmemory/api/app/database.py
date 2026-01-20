@@ -12,10 +12,13 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set in environment")
 
 # SQLAlchemy engine & session
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False}  # Needed for SQLite
-)
+# Configure connect_args based on database type
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}  # Needed for SQLite
+else:
+    connect_args = {}  # No special args for PostgreSQL, etc.
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base class for models

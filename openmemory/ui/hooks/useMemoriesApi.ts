@@ -1,9 +1,9 @@
-import { useState, useCallback } from 'react';
-import axios from 'axios';
-import { Memory, Client, Category } from '@/components/types';
-import { useDispatch, useSelector } from 'react-redux';
-import { AppDispatch, RootState } from '@/store/store';
-import { setAccessLogs, setMemoriesSuccess, setSelectedMemory, setRelatedMemories } from '@/store/memoriesSlice';
+import { Category, Memory } from '@/components/types'
+import { setAccessLogs, setMemoriesSuccess, setRelatedMemories, setSelectedMemory } from '@/store/memoriesSlice'
+import { AppDispatch, RootState } from '@/store/store'
+import axios from 'axios'
+import { useCallback, useState } from 'react'
+import { useDispatch, useSelector } from 'react-redux'
 
 // Define the new simplified memory type
 export interface SimpleMemory {
@@ -104,7 +104,9 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
   const memories = useSelector((state: RootState) => state.memories.memories);
   const selectedMemory = useSelector((state: RootState) => state.memories.selectedMemory);
 
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
+  const isBrowser = typeof window !== 'undefined';
+  const SSR_API = process.env.NEXT_PUBLIC_API_URL || "http://host.docker.internal:8765";
+  const URL = isBrowser ? "http://localhost:8765" : SSR_API;
 
   const fetchMemories = useCallback(async (
     query?: string,

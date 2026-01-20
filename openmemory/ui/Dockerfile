@@ -40,7 +40,8 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 COPY --chown=nextjs:nodejs entrypoint.sh /home/nextjs/entrypoint.sh
-RUN chmod +x /home/nextjs/entrypoint.sh
+# Ensure entrypoint has Unix line endings so the shebang works inside the container
+RUN sed -i 's/\r$//' /home/nextjs/entrypoint.sh && chmod +x /home/nextjs/entrypoint.sh
 
 USER nextjs
 

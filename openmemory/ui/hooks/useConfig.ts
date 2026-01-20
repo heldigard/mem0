@@ -1,20 +1,18 @@
-import { useState } from 'react';
-import axios from 'axios';
-import { useDispatch, useSelector } from 'react-redux';
-import { AppDispatch, RootState } from '@/store/store';
 import {
-  setConfigLoading,
-  setConfigSuccess,
-  setConfigError,
-  updateLLM,
-  updateEmbedder,
-  updateMem0Config,
-  updateOpenMemory,
-  LLMProvider,
-  EmbedderProvider,
-  Mem0Config,
-  OpenMemoryConfig
-} from '@/store/configSlice';
+    EmbedderProvider,
+    LLMProvider,
+    Mem0Config,
+    OpenMemoryConfig,
+    setConfigError,
+    setConfigLoading,
+    setConfigSuccess,
+    updateEmbedder,
+    updateLLM
+} from '@/store/configSlice'
+import { AppDispatch } from '@/store/store'
+import axios from 'axios'
+import { useState } from 'react'
+import { useDispatch } from 'react-redux'
 
 interface UseConfigApiReturn {
   fetchConfig: () => Promise<void>;
@@ -30,12 +28,14 @@ export const useConfig = (): UseConfigApiReturn => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const dispatch = useDispatch<AppDispatch>();
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
-  
+  const isBrowser = typeof window !== 'undefined';
+  const SSR_API = process.env.NEXT_PUBLIC_API_URL || "http://host.docker.internal:8765";
+  const URL = isBrowser ? "http://localhost:8765" : SSR_API;
+
   const fetchConfig = async () => {
     setIsLoading(true);
     dispatch(setConfigLoading());
-    
+
     try {
       const response = await axios.get(`${URL}/api/v1/config`);
       dispatch(setConfigSuccess(response.data));
@@ -52,7 +52,7 @@ export const useConfig = (): UseConfigApiReturn => {
   const saveConfig = async (config: { openmemory?: OpenMemoryConfig; mem0: Mem0Config }) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
       const response = await axios.put(`${URL}/api/v1/config`, config);
       dispatch(setConfigSuccess(response.data));
@@ -70,7 +70,7 @@ export const useConfig = (): UseConfigApiReturn => {
   const resetConfig = async () => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
       const response = await axios.post(`${URL}/api/v1/config/reset`);
       dispatch(setConfigSuccess(response.data));
@@ -88,7 +88,7 @@ export const useConfig = (): UseConfigApiReturn => {
   const saveLLMConfig = async (llmConfig: LLMProvider) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
       const response = await axios.put(`${URL}/api/v1/config/mem0/llm`, llmConfig);
       dispatch(updateLLM(response.data));
@@ -105,7 +105,7 @@ export const useConfig = (): UseConfigApiReturn => {
   const saveEmbedderConfig = async (embedderConfig: EmbedderProvider) => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
       const response = await axios.put(`${URL}/api/v1/config/mem0/embedder`, embedderConfig);
       dispatch(updateEmbedder(response.data));
@@ -128,4 +128,4 @@ export const useConfig = (): UseConfigApiReturn => {
     isLoading,
     error
   };
-}; 
+};

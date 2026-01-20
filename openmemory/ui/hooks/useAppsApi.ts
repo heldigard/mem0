@@ -1,25 +1,25 @@
-import { useState, useCallback } from 'react';
-import axios from 'axios';
-import { useDispatch, useSelector } from 'react-redux';
-import { AppDispatch, RootState } from '@/store/store';
 import {
-  App,
-  AppDetails,
-  AppMemory,
-  AccessedMemory,
-  setAppsSuccess,
-  setAppsError,
-  setAppsLoading,
-  setSelectedAppLoading,
-  setSelectedAppDetails,
-  setCreatedMemoriesLoading,
-  setCreatedMemoriesSuccess,
-  setCreatedMemoriesError,
-  setAccessedMemoriesLoading,
-  setAccessedMemoriesSuccess,
-  setAccessedMemoriesError,
-  setSelectedAppError,
-} from '@/store/appsSlice';
+    AccessedMemory,
+    App,
+    AppDetails,
+    AppMemory,
+    setAccessedMemoriesError,
+    setAccessedMemoriesLoading,
+    setAccessedMemoriesSuccess,
+    setAppsError,
+    setAppsLoading,
+    setAppsSuccess,
+    setCreatedMemoriesError,
+    setCreatedMemoriesLoading,
+    setCreatedMemoriesSuccess,
+    setSelectedAppDetails,
+    setSelectedAppError,
+    setSelectedAppLoading,
+} from '@/store/appsSlice'
+import { AppDispatch, RootState } from '@/store/store'
+import axios from 'axios'
+import { useCallback, useState } from 'react'
+import { useDispatch, useSelector } from 'react-redux'
 
 interface ApiResponse {
   total: number;
@@ -67,7 +67,9 @@ export const useAppsApi = (): UseAppsApiReturn => {
   const dispatch = useDispatch<AppDispatch>();
   const user_id = useSelector((state: RootState) => state.profile.userId);
 
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
+  const isBrowser = typeof window !== 'undefined';
+  const SSR_API = process.env.NEXT_PUBLIC_API_URL || "http://host.docker.internal:8765";
+  const URL = isBrowser ? "http://localhost:8765" : SSR_API;
 
   const fetchApps = useCallback(async (params: FetchAppsParams = {}): Promise<{ apps: App[], total: number }> => {
     const {

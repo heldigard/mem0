@@ -1,9 +1,8 @@
-import { useState } from 'react';
-import axios from 'axios';
-import { useDispatch, useSelector } from 'react-redux';
-import { AppDispatch, RootState } from '@/store/store';
-import { setApps, setTotalApps } from '@/store/profileSlice';
-import { setTotalMemories } from '@/store/profileSlice';
+import { setApps, setTotalApps, setTotalMemories } from '@/store/profileSlice'
+import { AppDispatch, RootState } from '@/store/store'
+import axios from 'axios'
+import { useState } from 'react'
+import { useDispatch, useSelector } from 'react-redux'
 
 // Define the new simplified memory type
 export interface SimpleMemory {
@@ -35,7 +34,9 @@ export const useStats = (): UseMemoriesApiReturn => {
   const dispatch = useDispatch<AppDispatch>();
   const user_id = useSelector((state: RootState) => state.profile.userId);
 
-  const URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
+  const isBrowser = typeof window !== 'undefined';
+  const SSR_API = process.env.NEXT_PUBLIC_API_URL || "http://host.docker.internal:8765";
+  const URL = isBrowser ? "http://localhost:8765" : SSR_API;
 
   const fetchStats = async () => {
     setIsLoading(true);

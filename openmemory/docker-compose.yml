@@ -1,6 +1,7 @@
 services:
   mem0_store:
     image: qdrant/qdrant
+    restart: unless-stopped
     ports:
       - "6333:6333"
     volumes:
@@ -8,6 +9,7 @@ services:
   openmemory-mcp:
     image: mem0/openmemory-mcp
     build: api/
+    restart: unless-stopped
     environment:
       - USER
       - API_KEY
@@ -26,11 +28,11 @@ services:
       context: ui/
       dockerfile: Dockerfile
     image: mem0/openmemory-ui:latest
+    restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-      - NEXT_PUBLIC_USER_ID=${USER}
+    env_file:
+      - ./ui/.env
 
 volumes:
   mem0_storage:
