@@ -25,6 +25,10 @@ make up
 
 The API will be available at `http://localhost:8765`
 
+**Embedding model dimensions** ⚠️
+
+Ensure the environment variable `EMBEDDING_DIMS` matches the dimensionality produced by your configured embedder (for example, **1536** for OpenAI `text-embedding-3-small`, **2560** for Qwen3 embeddings). Set it in `api/.env` (for example `EMBEDDING_DIMS=2560`) and restart the services so the vector store is created/updated with the correct dimension.
+
 ### Common Docker Commands
 
 - View logs: `make logs`
