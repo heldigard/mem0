@@ -51,7 +51,7 @@ export const Install = () => {
 
   const handleCopy = async (tab: string, isMcp: boolean = false) => {
     const text = isMcp
-      ? `${URL}/mcp/openmemory/sse/${user}`
+      ? `${URL}/mcp/claude/sse/${user}`
       : `npx @openmemory/install local ${URL}/mcp/${tab}/sse/${user} --client ${tab}`;
 
     try {
@@ -132,7 +132,7 @@ export const Install = () => {
               <div className="relative">
                 <pre className="bg-zinc-800 px-4 py-3 rounded-md overflow-x-auto text-sm">
                   <code className="text-gray-300">
-                    {URL}/mcp/openmemory/sse/{user}
+                    {URL}/mcp/claude/sse/{user}
                   </code>
                 </pre>
                 <div>
