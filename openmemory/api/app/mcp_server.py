@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.routing import APIRouter
 from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
+from sqlalchemy.orm import Session, joinedload
 
 # Load environment variables
 load_dotenv()
@@ -165,58 +166,130 @@ async def search_memory(query: str) -> str:
             user_memories = db.query(Memory).filter(Memory.user_id == user.id).all()
             accessible_memory_ids = [memory.id for memory in user_memories if check_memory_access_permissions(db, memory, app.id)]
 
-            filters = {
-                "user_id": uid
-            }
+            # Try Qdrant semantic search first
+            try:
+                from qdrant_client.models import FieldCondition, MatchValue, HasIdCondition, Filter
 
-            embeddings = memory_client.embedding_model.embed(query, "search")
+                # Build Qdrant filter - use the string uid for filtering
+                conditions = [FieldCondition(key="user_id", match=MatchValue(value=uid))]
+                if accessible_memory_ids:
+                    accessible_memory_ids_str = [str(mid) for mid in accessible_memory_ids]
+                    conditions.append(HasIdCondition(has_id=accessible_memory_ids_str))
+                filters = Filter(must=conditions)
 
-            hits = memory_client.vector_store.search(
-                query=query, 
-                vectors=embeddings, 
-                limit=10, 
-                filters=filters,
-            )
+                # Generate embeddings and search
+                embeddings = memory_client.embedding_model.embed(query, "search")
 
-            allowed = set(str(mid) for mid in accessible_memory_ids) if accessible_memory_ids else None
+                # Use Qdrant client directly with proper filters
+                hits = memory_client.vector_store.client.query_points(
+                    collection_name=memory_client.vector_store.collection_name,
+                    query=embeddings,
+                    query_filter=filters,
+                    limit=10,
+                )
+
+                if hits.points:
+                    results = []
+                    for point in hits.points:
+                        results.append({
+                            "id": str(point.id),
+                            "memory": point.payload.get("data"),
+                            "hash": point.payload.get("hash"),
+                            "created_at": point.payload.get("created_at"),
+                            "updated_at": point.payload.get("updated_at"),
+                            "score": point.score,
+                        })
+
+                    # Log access for each result
+                    for r in results:
+                        if r.get("id"):
+                            access_log = MemoryAccessLog(
+                                memory_id=uuid.UUID(r["id"]),
+                                app_id=app.id,
+                                access_type="search",
+                                metadata_={
+                                    "query": query,
+                                    "score": r.get("score"),
+                                    "hash": r.get("hash"),
+                                },
+                            )
+                            db.add(access_log)
+                    db.commit()
+
+                    return json.dumps({"results": results}, indent=2)
+            except Exception as qdrant_error:
+                logging.warning(f"Qdrant search failed: {qdrant_error}, falling back to text search")
+
+            # Fallback: Text-based search in PostgreSQL
+            search_pattern = f"%{query}%"
+            memories = db.query(Memory).filter(
+                Memory.user_id == user.id,
+                Memory.state != MemoryState.deleted,
+                Memory.content.ilike(search_pattern)
+            ).limit(20).all()
 
             results = []
-            for h in hits:
-                # All vector db search functions return OutputData class
-                id, score, payload = h.id, h.score, h.payload
-                if allowed and h.id is None or h.id not in allowed: 
-                    continue
-                
-                results.append({
-                    "id": id, 
-                    "memory": payload.get("data"), 
-                    "hash": payload.get("hash"),
-                    "created_at": payload.get("created_at"), 
-                    "updated_at": payload.get("updated_at"), 
-                    "score": score,
-                })
-
-            for r in results: 
-                if r.get("id"): 
+            for memory in memories:
+                if memory.id in accessible_memory_ids:
+                    results.append({
+                        "id": str(memory.id),
+                        "memory": memory.content,
+                        "hash": None,
+                        "created_at": int(memory.created_at.timestamp()) if memory.created_at else 0,
+                        "updated_at": None,
+                        "score": 1.0,  # Fake score for text search
+                    })
+                    # Log access
                     access_log = MemoryAccessLog(
-                        memory_id=uuid.UUID(r["id"]),
+                        memory_id=memory.id,
                         app_id=app.id,
                         access_type="search",
-                        metadata_={
-                            "query": query,
-                            "score": r.get("score"),
-                            "hash": r.get("hash"),
-                        },
+                        metadata_={"query": query, "score": 1.0},
                     )
                     db.add(access_log)
             db.commit()
+
+            return json.dumps({"results": results}, indent=2)
+
+        finally:
+            db.close()
+    except Exception as e:
+        logging.exception(e)
+        return f"Error searching memory: {e}"
+
+
+async def _basic_search(query: str, uid: str, client_name: str) -> str:
+    """Fallback search without Qdrant filters"""
+    memory_client = get_memory_client_safe()
+    if not memory_client:
+        return "Error: Memory system is unavailable"
+
+    try:
+        db = SessionLocal()
+        try:
+            user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
+
+            embeddings = memory_client.embedding_model.embed(query, "search")
+            hits = memory_client.vector_store.search(
+                query=query,
+                vectors=embeddings,
+                limit=10,
+            )
+
+            results = []
+            for h in hits:
+                results.append({
+                    "id": str(h.id),
+                    "memory": h.payload.get("data"),
+                    "score": h.score,
+                })
 
             return json.dumps({"results": results}, indent=2)
         finally:
             db.close()
     except Exception as e:
         logging.exception(e)
-        return f"Error searching memory: {e}"
+        return f"Error in basic search: {e}"
 
 
 @mcp.tool(description="List all memories in the user's memory")
@@ -228,59 +301,43 @@ async def list_memories() -> str:
     if not client_name:
         return "Error: client_name not provided"
 
-    # Get memory client safely
-    memory_client = get_memory_client_safe()
-    if not memory_client:
-        return "Error: Memory system is currently unavailable. Please try again later."
-
     try:
         db = SessionLocal()
         try:
             # Get or create user and app
             user, app = get_user_and_app(db, user_id=uid, app_id=client_name)
 
-            # Get all memories
-            memories = memory_client.get_all(user_id=uid)
-            filtered_memories = []
+            # Get all memories for this user directly from DB
+            user_memories = db.query(Memory).filter(
+                Memory.user_id == user.id,
+                Memory.state != MemoryState.deleted
+            ).options(
+                joinedload(Memory.categories),
+                joinedload(Memory.app)
+            ).limit(20).all()
 
-            # Filter memories based on permissions
-            user_memories = db.query(Memory).filter(Memory.user_id == user.id).all()
-            accessible_memory_ids = [memory.id for memory in user_memories if check_memory_access_permissions(db, memory, app.id)]
-            if isinstance(memories, dict) and 'results' in memories:
-                for memory_data in memories['results']:
-                    if 'id' in memory_data:
-                        memory_id = uuid.UUID(memory_data['id'])
-                        if memory_id in accessible_memory_ids:
-                            # Create access log entry
-                            access_log = MemoryAccessLog(
-                                memory_id=memory_id,
-                                app_id=app.id,
-                                access_type="list",
-                                metadata_={
-                                    "hash": memory_data.get('hash')
-                                }
-                            )
-                            db.add(access_log)
-                            filtered_memories.append(memory_data)
-                db.commit()
-            else:
-                for memory in memories:
-                    memory_id = uuid.UUID(memory['id'])
-                    memory_obj = db.query(Memory).filter(Memory.id == memory_id).first()
-                    if memory_obj and check_memory_access_permissions(db, memory_obj, app.id):
-                        # Create access log entry
-                        access_log = MemoryAccessLog(
-                            memory_id=memory_id,
-                            app_id=app.id,
-                            access_type="list",
-                            metadata_={
-                                "hash": memory.get('hash')
-                            }
-                        )
-                        db.add(access_log)
-                        filtered_memories.append(memory)
-                db.commit()
-            return json.dumps(filtered_memories, indent=2)
+            results = []
+            for memory in user_memories:
+                if check_memory_access_permissions(db, memory, app.id):
+                    # Create access log entry
+                    access_log = MemoryAccessLog(
+                        memory_id=memory.id,
+                        app_id=app.id,
+                        access_type="list",
+                        metadata_={}
+                    )
+                    db.add(access_log)
+
+                    results.append({
+                        "id": str(memory.id),
+                        "memory": memory.content,
+                        "created_at": int(memory.created_at.timestamp()) if memory.created_at else 0,
+                        "state": memory.state.value,
+                        "categories": [c.name for c in memory.categories]
+                    })
+            db.commit()
+
+            return json.dumps({"results": results}, indent=2)
         finally:
             db.close()
     except Exception as e:
@@ -460,8 +517,10 @@ async def handle_get_message(request: Request):
 
 
 @mcp_router.post("/{client_name}/sse/{user_id}/messages/")
-async def handle_post_message(request: Request):
+async def handle_post_message_sse(request: Request):
+    """Handle POST messages for SSE with path params"""
     return await handle_post_message(request)
+
 
 async def handle_post_message(request: Request):
     """Handle POST messages for SSE"""
@@ -474,15 +533,16 @@ async def handle_post_message(request: Request):
 
         # Create a simple send function that does nothing
         async def send(message):
-            return {}
+            pass
 
         # Call handle_post_message with the correct arguments
         await sse.handle_post_message(request.scope, receive, send)
 
         # Return a success response
         return {"status": "ok"}
-    finally:
-        pass
+    except Exception as e:
+        logging.exception("Error handling POST message")
+        return {"status": "error", "message": str(e)}
 
 def setup_mcp_server(app: FastAPI):
     """Setup MCP server with the FastAPI application"""
